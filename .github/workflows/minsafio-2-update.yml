@@ -1,0 +1,83 @@
+name: Actualizar JSON de Minsafio 2
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: minsafio-2-update
+  cancel-in-progress: false
+
+jobs:
+  actualizar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Abrir la rama principal del repositorio
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Generar el JSON de actualización
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" > releases.json
+
+          jq -e -s '
+            [
+              .[][] |
+              select(.draft == false and .prerelease == false) |
+              . as $release |
+              [
+                .assets[] |
+                select(
+                  .state == "uploaded" and
+                  (.name | test("^minsafio-modpack-v[0-9]+\\.[0-9]+\\.[0-9]+\\.zip$"))
+                )
+              ] as $assets |
+              select(($assets | length) > 0) |
+              {release: $release, assets: $assets}
+            ] |
+            max_by(.release.published_at) |
+            if . == null then
+              error("No se encontró una release estable de Minsafio 2")
+            elif (.assets | length) != 1 then
+              error("La release debe tener un solo ZIP de Minsafio 2")
+            else
+              .release as $release |
+              .assets[0] as $asset |
+              if (($asset.digest // "") | test("^sha256:[0-9a-fA-F]{64}$")) then
+                {
+                  repository: $release.html_url | split("/")[3:5] | join("/"),
+                  version: $release.tag_name,
+                  releaseId: $release.id,
+                  assetId: $asset.id,
+                  assetName: $asset.name,
+                  downloadUrl: $asset.browser_download_url,
+                  archiveBytes: $asset.size,
+                  archiveSha256: ($asset.digest | sub("^sha256:"; "") | ascii_downcase)
+                }
+              else
+                error("GitHub no devolvió un SHA-256 válido para el ZIP")
+              end
+            end
+          ' releases.json > minsafio-2.json
+
+      - name: Guardar el JSON en GitHub
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- minsafio-2.json
+
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+
+          git commit -m "Actualizar JSON de Minsafio 2"
+          git pull --rebase
+          git push
